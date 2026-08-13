@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html {
+  color-scheme: light;
+}
+
+* {
+  scrollbar-width: thin;
+}
+
+/* Faint geometric lattice on the page background only — a quiet nod to
+   Islamic tilework, not applied inside the widget itself so the chat
+   content stays perfectly legible. */
+.bg-geo-pattern {
+  background-image:
+    linear-gradient(135deg, rgba(16, 35, 58, 0.05) 1px, transparent 1px),
+    linear-gradient(45deg, rgba(16, 35, 58, 0.05) 1px, transparent 1px);
+  background-size: 26px 26px;
+}
