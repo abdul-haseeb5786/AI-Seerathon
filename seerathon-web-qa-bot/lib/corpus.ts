@@ -21,6 +21,8 @@
 //   for every single Timeline entry — meaning none of them ever had enough
 //   text to be considered a candidate, regardless of the question asked.
 
+import { tokenize } from './text';
+
 const BASE = process.env.SEERATHON_CORPUS_BASE ?? 'https://api.islamicdesk.com/api/seerathon/corpus';
 
 export type CorpusSource = 'shamail' | 'timeline';
@@ -137,10 +139,19 @@ function normalizeTimelineItem(item: any): NormalizedEntry {
 
   // Timeline items ship no `keywords` field at all (unlike Shamail), so
   // this derives equivalent signal from the slug and each sub-section's
-  // title — these are curated labels too, just not filed under that name.
-  const slugWords = (item.slug?.en ?? '').split('-').filter(Boolean);
-  const sectionWords = sections.flatMap((s) => (s.title ?? '').toLowerCase().split(/\s+/)).filter(Boolean);
-  const keywords = [...slugWords, ...(primary.section ? [primary.section] : []), ...sectionWords];
+  // title. Runs through the SAME tokenize() used for scoring — not a raw
+  // split — specifically because a raw split let generic words like "his"
+  // through as if they were curated +3 keywords (title: "...Under the Care
+  // of His Grandfather..." vs question "...treat HIS neighbors" — wrong
+  // match, confirmed during testing). Keywords should be content words,
+  // not function words, same bar as everywhere else.
+  const slugText = (item.slug?.en ?? '').replace(/-/g, ' ');
+  const sectionTitleText = sections.map((s) => s.title ?? '').join(' ');
+  const keywords = [
+    ...tokenize(slugText),
+    ...(primary.section ? [primary.section] : []),
+    ...tokenize(sectionTitleText),
+  ];
 
   // No hadith reference on Timeline entries, but the year is real,
   // citeable context — use it as the hawala-equivalent when present.

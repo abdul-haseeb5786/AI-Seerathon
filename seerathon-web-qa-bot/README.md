@@ -72,11 +72,29 @@ vocabulary and blocking it would misfire on legitimate questions constantly.
 If the brief wants "sunnah"-framed questions refused too, that's an explicit
 decision to make, not a bug to fix.
 
-**Known lexical-matching limitation:** spelling/hyphenation variants aren't
-normalized (e.g. "Ashab al-Feel" vs the corpus's "As-hab-al-Feel" share no
-tokens after tokenizing, so that specific phrasing won't match even though
-the event is in the corpus). Not fixed — would need stemming/fuzzy matching,
-a bigger change than the scope of this pass.
+**Second false-match found during the Timeline retest, now fixed:** "How did
+the Prophet treat his neighbors?" was answering from an entry about being
+raised by his grandfather — nothing to do with neighbors. Cause: the pronoun
+"his" appeared in both the question and that entry's title, and
+`normalizeTimelineItem()` was deriving pseudo-keywords from sub-section
+titles via a raw `.split()` with no stopword filtering — so "his" scored as
+a curated +3 keyword hit instead of being filtered out like it is everywhere
+else. Fixed by moving the stopword list and `tokenize()` into a shared
+`lib/text.ts`, so keyword derivation and scoring now run through the exact
+same filter instead of two that could quietly drift apart. Re-verified this
+didn't touch the Hijrah match (still correctly cites "Springs of Islam in
+Medina," 622 CE) — that was the one regression risk that actually mattered.
+
+**Observation, not a bug:** the Hijrah answer is long — the real "Springs of
+Islam in Medina" timeline item bundles several sub-events (arrival in Quba,
+mosque construction, Ansar-Muhajireen brotherhood, Aisha's marriage) under
+one entry, and the current code returns the whole bundle whenever any part
+of it matches. The citation is correct and the content is genuinely part of
+that entry, so this isn't wrong — but for a narrow question like "when did
+the Hijrah happen," a shorter answer pulled from just the most relevant
+sub-section would read better. Didn't change this without checking first —
+happy to add sub-section-level matching if you want tighter answers.
+
 
 ## Setup
 
@@ -120,3 +138,7 @@ element; everything else stays quiet on purpose.
   once you're testing against real data.
 - Not yet wired: pagination beyond the first page of results, and the
   `/courses` endpoint isn't called anywhere (by design — see scope note above).
+- **Spelling/hyphenation variants aren't normalized** — e.g. "Ashab al-Feel"
+  vs the corpus's "As-hab-al-Feel" share no tokens after tokenizing, so that
+  specific phrasing won't match even though the event is in the corpus.
+  Would need stemming/fuzzy matching to fix; bigger change than this pass.

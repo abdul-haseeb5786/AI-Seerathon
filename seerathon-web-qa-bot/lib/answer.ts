@@ -1,6 +1,7 @@
 import { getAllShamail, getAllTimeline, type NormalizedEntry } from './corpus';
 import { isRulingQuestion } from './guardrails';
 import { MESSAGES } from './messages';
+import { tokenize } from './text';
 
 export type AnswerKind = 'answer' | 'fallback' | 'refusal';
 
@@ -16,35 +17,6 @@ export type BotAnswer = {
   text: string;
   citations: Citation[];
 };
-
-const STOPWORDS = new Set([
-  'the', 'and', 'was', 'with', 'for', 'that', 'this', 'from', 'have', 'what',
-  'does', 'did', 'about', 'tell', 'me', 'you', 'your', 'please', 'when', 'how',
-  'ka', 'ki', 'ke', 'hai', 'mein', 'main', 'kya', 'kis', 'kaisa', 'kaisi',
-  'bare', 'bataye', 'bataen', 'kar',
-  // Domain stopwords: pure address/honorific terms that appear in nearly
-  // EVERY entry regardless of topic, so they contribute zero discriminating
-  // signal — this was the direct cause of wrong citations during testing,
-  // e.g. "Nabi" alone was enough to match an unrelated entry about his
-  // names/titles. Deliberately does NOT include proper names (Muhammad,
-  // Ahmad, Aisha, Abdullah, ...) — which specific person an entry is about
-  // is real topical signal, not filler, and blanket-filtering "Muhammad"
-  // made a plain question like "when was Muhammad born" score too low
-  // against the actual birth entry during testing.
-  'prophet', 'nabi', 'beloved', 'holy', 'blessed', 'sallallahu',
-  'alayhi', 'wasallam', 'sayyiduna', 'sayyidatuna', 'narrated', 'kareem',
-  'hazrat', 'huzoor', 'allah', 'said', 'says', 'like', 'once',
-]);
-
-function tokenize(text: string): Set<string> {
-  return new Set(
-    text
-      .toLowerCase()
-      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-      .split(/\s+/)
-      .filter((w) => w.length > 2 && !STOPWORDS.has(w)),
-  );
-}
 
 // Scoring combines two signals:
 //  - `keywords`: curated tags the corpus itself ships on every entry, so a
