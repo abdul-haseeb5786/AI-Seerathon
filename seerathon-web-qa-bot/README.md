@@ -15,42 +15,68 @@ ruling/fatwa questions, and always shows the disclaimer.
 | Corpus APIs | `lib/corpus.ts` — exact base URL / paths / query params from the brief |
 | No free-form rulings | Same ruling gate — it overrides even a strong corpus match |
 
-## ⚠️ Status as of last test pass
+## ⚠️ Status as of last test pass (verified live, 2026-08-14)
 
-**Corpus scope** — resolved, following the API note: **Shamail + Timeline
-answer questions, Courses is reference-only.** Still worth a quick confirm
-with organizers since the brief's other section phrases it more loosely.
+**Corpus scope** — resolved: **Shamail + Timeline answer questions, Courses
+is reference-only.** Still worth a quick confirm with organizers since the
+brief's other section phrases it more loosely.
 
-**Shamail schema — CONFIRMED** against a real `/meta` and `/shamail?limit=1`
-response. Fixed in `lib/corpus.ts`:
-- The envelope is `{ data: { items: [...] } }`, not `{ data: [...] }` — the
-  original code missed this nesting and silently treated every response as
-  empty, which is why nothing matched during the first test pass.
-- Real fields: `en.title`, `en.hadeesTarjama` (the entry text), `en.hadeesHawala`
-  (hadith reference — falls back to the `ur` block when `en`'s is blank),
-  `en.points` (bullet takeaways), and a top-level `keywords[]` array now used
-  to weight the local matcher.
-- Matching fetches the full corpus (only ~120 + ~34 entries, cached 5 min) and
-  scores locally with `keywords` weighted highest, instead of trusting the
-  API's undocumented `?q=` ranking. This also protects against `/meta`'s
-  documented 60 req/min/IP rate limit — uncached, every chat message would
-  burn 2 of those on corpus fetches alone.
-- Citation chips now show the hawala when present, per `usage_rules` in
-  `/meta` ("cite... source id and title, and hawala when available").
+**Shamail schema — CONFIRMED and working.** Real fields: `en.title`,
+`en.hadeesTarjama` (entry text), `en.hadeesHawala` (hadith reference — falls
+back to `ur` block when `en`'s is blank), `en.points`, top-level `keywords[]`.
 
-**Timeline schema — still UNCONFIRMED.** No real `/timeline?limit=1` response
-seen yet, so `normalizeList()` assumes it mirrors the Shamail shape. Reasonable
-bet (same API, same team), but grab a real sample before trusting
-Timeline-based answers (e.g. "when was the Hijrah").
+**Timeline schema — CONFIRMED and working end-to-end**, as of the second live
+test pass. Turned out to be a genuinely different shape from Shamail, not
+just different field names:
+- No `hadeesTarjama`, no `hadeesHawala`, no `keywords[]` at all.
+- Real text lives in `en.content[]` — an array of dated sub-events (e.g. one
+  "Blessed Birth" item bundles both the birth itself *and* the father's
+  passing as separate `{title, sequence, content_text}` entries). Fixed by
+  concatenating all sub-sections in sequence order.
+- `en.description` exists but is an empty string on real data — the original
+  code's fallback chain (`?? primary.description ?? ...`) stopped there,
+  because `??` only skips `null`/`undefined`, not `""`. That silently
+  produced empty text for **every single Timeline entry**, which is the
+  actual reason Timeline-based questions (Hijrah, etc.) never answered even
+  after the Shamail fix — they were being normalized away before scoring
+  ever started, not failing to match.
+- No `keywords[]`, so `normalizeTimelineItem()` derives equivalent signal
+  from the slug (`blessed-birth` → `blessed`, `birth`) and each sub-section's
+  title.
+- No hadith reference to cite — uses `gregorianDate` as the hawala instead
+  (e.g. "571 CE"), which is genuine citeable context for a timeline event.
+- Verified live: "When was Prophet Muhammad born?" now correctly answers
+  from the real Blessed Birth entry, formats both sub-events, cites "571 CE."
 
-**Judgment call surfaced during testing — not yet decided:** "Is it sunnah to
-eat with the right hand like the Prophet ﷺ did?" is currently **not** treated
-as a ruling question — `isRulingQuestion()` only flags phrases like "is it
-allowed" / "jaiz hai", not bare "sunnah", because that word is also normal
-Shamail vocabulary and blocking it would misfire on legitimate questions
-constantly. So right now this gets answered from the corpus like any other
-Shamail topic. If the brief wants "sunnah" phrased as a ruling-style question
-refused too, that needs an explicit decision — it's a real trade-off, not a bug.
+**Matching algorithm — tightened after live testing surfaced 3 wrong
+citations** (not just "no answer" — a *confident, wrong* answer, e.g. a
+question about eating returned an entry about the Prophet's ﷺ names, because
+they coincidentally shared the word "Nabi"). Two changes:
+- Domain stopwords added for pure address/honorific terms that appear in
+  nearly every entry regardless of topic (prophet, nabi, sayyiduna, beloved,
+  holy, blessed, hazrat, sallallahu, alayhi, wasallam, ...) — these were
+  contributing false signal on their own. Deliberately does **not** include
+  proper names (Muhammad, Ahmad, Aisha, Abdullah, ...) — which person an
+  entry is about is real topical signal, not filler.
+- Confidence threshold raised from "any single overlapping word" to
+  `MIN_CONFIDENT_SCORE = 3` (one real keyword hit, or several word overlaps).
+  Trade-off, stated plainly: this makes the bot say "not in corpus" more
+  often on weakly-matching questions — which is the correct trade-off for
+  "grounded ONLY," since a wrong citation is worse than an honest fallback.
+
+**Judgment call — still not decided:** "Is it sunnah to eat with the right
+hand like the Prophet ﷺ did?" is currently **not** treated as a ruling
+question — `isRulingQuestion()` only flags phrases like "is it allowed" /
+"jaiz hai", not bare "sunnah", because that word is also normal Shamail
+vocabulary and blocking it would misfire on legitimate questions constantly.
+If the brief wants "sunnah"-framed questions refused too, that's an explicit
+decision to make, not a bug to fix.
+
+**Known lexical-matching limitation:** spelling/hyphenation variants aren't
+normalized (e.g. "Ashab al-Feel" vs the corpus's "As-hab-al-Feel" share no
+tokens after tokenizing, so that specific phrasing won't match even though
+the event is in the corpus). Not fixed — would need stemming/fuzzy matching,
+a bigger change than the scope of this pass.
 
 ## Setup
 

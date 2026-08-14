@@ -2,23 +2,24 @@
 //
 // Base: https://api.islamicdesk.com/api/seerathon/corpus
 //
-// CONFIRMED against a real response (checked 2026-08-13, via a live
-// /meta and /shamail?limit=1 call):
-//   { error, data: { items: [...], total, page, limit, pages }, msg }
-//   item: {
-//     id, source, category: { id, name: {en, ur} },
-//     slug: {en, romanUrdu}, keywords: string[],
-//     en: { title, hadeesTarjama, hadeesHawala, type, points: string[] },
-//     ur: { ...same shape... }
-//   }
-// `hadeesTarjama` is the actual entry text. `hadeesHawala` (the hadith
-// reference, e.g. "Sahih Bukhari 3560") is sometimes only filled in on the
-// `ur` block even when `en` exists for the same entry — so hawala falls
-// back to `ur` if `en` is empty, rather than just reading `en`.
+// CONFIRMED against real live responses (checked 2026-08-14):
 //
-// Timeline shape is INFERRED from this (same API, same team, same bilingual
-// convention) but not yet confirmed against a real /timeline response —
-// tighten normalizeList's fallbacks below once you've seen one.
+// Shamail: { data: { items: [{ id, source, category, keywords: string[],
+//   en/ur: { title, hadeesTarjama, hadeesHawala, points: string[] } }] } }
+//
+// Timeline: a DIFFERENT shape, not just different field names —
+//   { data: { items: [{ id, source, slug: {en, romanUrdu},
+//     en/ur: { title, description, section, gregorianDate,
+//       content: [{ title, sequence, content_text }, ...] } } }] } }
+//   No `hadeesTarjama`, no `hadeesHawala`, no `keywords` at all. The real
+//   text lives in the `content[]` array — one Timeline item (e.g. "Blessed
+//   Birth") can bundle several dated sub-events (the birth itself, the
+//   father's passing, etc.), each with its own title + content_text.
+//   `description` exists but is an empty string on real data, which is what
+//   broke the old shared normalizer: `??` only falls through on
+//   null/undefined, not `""`, so it stopped there and returned empty text
+//   for every single Timeline entry — meaning none of them ever had enough
+//   text to be considered a candidate, regardless of the question asked.
 
 const BASE = process.env.SEERATHON_CORPUS_BASE ?? 'https://api.islamicdesk.com/api/seerathon/corpus';
 
@@ -73,14 +74,11 @@ export async function getTimelineById(id: string): Promise<any> {
 }
 
 // --- Full-corpus fetch with a short in-memory cache ---------------------
-// Only ~120 Shamail + ~34 Timeline entries total (per /meta counts), so
-// fetching everything and scoring locally — using the `keywords` field the
-// corpus already provides — is more reliable than trusting the API's own
-// `?q=` ranking, which is undocumented and unverified. Caching matters for
-// a second reason: /meta reports a 60 req/min per-IP rate limit, and
-// without a cache, every single chat message would spend 2 of those 60 on
-// corpus fetches alone — easy to blow through with a few people testing at
-// once during a demo.
+// Only ~120 Shamail + ~34 Timeline entries total, so fetching everything
+// and scoring locally is more reliable than trusting the API's own
+// undocumented `?q=` ranking. Caching protects against /meta's documented
+// 60 req/min/IP rate limit — uncached, every chat message would spend 2 of
+// those on corpus fetches alone.
 
 type Cached<T> = { data: T; expiresAt: number };
 let shamailCache: Cached<NormalizedEntry[]> | null = null;
@@ -90,7 +88,7 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
 export async function getAllShamail(): Promise<NormalizedEntry[]> {
   if (shamailCache && shamailCache.expiresAt > Date.now()) return shamailCache.data;
   const raw = await corpusFetch('/shamail', { limit: 120 });
-  const data = normalizeList(raw, 'shamail');
+  const data = extractItems(raw).map(normalizeShamailItem);
   shamailCache = { data, expiresAt: Date.now() + CACHE_TTL_MS };
   return data;
 }
@@ -98,48 +96,64 @@ export async function getAllShamail(): Promise<NormalizedEntry[]> {
 export async function getAllTimeline(): Promise<NormalizedEntry[]> {
   if (timelineCache && timelineCache.expiresAt > Date.now()) return timelineCache.data;
   const raw = await corpusFetch('/timeline', { limit: 120 });
-  const data = normalizeList(raw, 'timeline');
+  const data = extractItems(raw).map(normalizeTimelineItem);
   timelineCache = { data, expiresAt: Date.now() + CACHE_TTL_MS };
   return data;
 }
 
-// The corpus itself uses the ﷺ ligature (U+FDFA) throughout its title/text
-// fields. That single codepoint has almost no font coverage anywhere —
-// confirmed by testing several fonts including a dedicated Arabic one, all
-// rendered a broken box — while the fully spelled-out phrase renders
-// correctly everywhere. This swaps the encoding only, not the meaning, the
-// same way normalizing smart quotes isn't "changing a quotation." Applied
-// at the normalization boundary so it's consistent everywhere the corpus's
-// own text is displayed, without touching what's actually stored/reasoned
-// about internally.
-function normalizeHonorific(text: string): string {
-  if (!text.includes('\uFDFA')) return text;
-  return text
-    .replace(/\uFDFA/g, ' \u0635\u0644\u0649 \u0627\u0644\u0644\u0647 \u0639\u0644\u064a\u0647 \u0648\u0633\u0644\u0645 ')
-    .replace(/\s+/g, ' ')
-    .trim();
+function extractItems(raw: any): any[] {
+  const items = raw?.data?.items ?? raw?.data ?? raw?.results ?? raw?.items ?? (Array.isArray(raw) ? raw : []);
+  return Array.isArray(items) ? items : [];
 }
 
-function normalizeList(raw: any, source: CorpusSource): NormalizedEntry[] {
-  const items = raw?.data?.items ?? raw?.data ?? raw?.results ?? raw?.items ?? (Array.isArray(raw) ? raw : []);
-  if (!Array.isArray(items)) return [];
+function normalizeShamailItem(item: any): NormalizedEntry {
+  const primary = item.en ?? item.ur ?? {};
+  return {
+    id: String(item.id ?? item._id ?? ''),
+    source: 'shamail',
+    title: primary.title ?? 'Shamail entry',
+    text: primary.hadeesTarjama ?? '',
+    // Sometimes only the `ur` block has hawala filled in even when `en`
+    // exists for the same entry — fall back rather than showing nothing.
+    hawala: item.en?.hadeesHawala || item.ur?.hadeesHawala || undefined,
+    points: Array.isArray(primary.points) ? primary.points : [],
+    keywords: Array.isArray(item.keywords) ? item.keywords : [],
+    category: item.category?.name?.en ?? (typeof item.category?.name === 'string' ? item.category.name : undefined),
+  };
+}
 
-  return items.map((item: any): NormalizedEntry => {
-    const primary = item.en ?? item.ur ?? {};
-    return {
-      id: String(item.id ?? item._id ?? ''),
-      source,
-      title: normalizeHonorific(
-        primary.title ?? item.title ?? `${source === 'shamail' ? 'Shamail' : 'Timeline'} entry`,
-      ),
-      text: normalizeHonorific(
-        primary.hadeesTarjama ?? primary.text ?? primary.description ?? item.text ?? item.content ?? '',
-      ),
-      hawala: item.en?.hadeesHawala || item.ur?.hadeesHawala || undefined,
-      points: (Array.isArray(primary.points) ? primary.points : []).map(normalizeHonorific),
-      keywords: Array.isArray(item.keywords) ? item.keywords : [],
-      category:
-        item.category?.name?.en ?? (typeof item.category?.name === 'string' ? item.category.name : undefined),
-    };
-  });
+function normalizeTimelineItem(item: any): NormalizedEntry {
+  const primary = item.en ?? item.ur ?? {};
+  const sections: any[] = Array.isArray(primary.content) ? primary.content : [];
+
+  // Combine every dated sub-event into one readable body, sub-headed by
+  // its own title, in sequence order.
+  const text = sections
+    .slice()
+    .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))
+    .map((s) => (s.title ? `${s.title}\n${s.content_text ?? ''}` : (s.content_text ?? '')))
+    .filter(Boolean)
+    .join('\n\n');
+
+  // Timeline items ship no `keywords` field at all (unlike Shamail), so
+  // this derives equivalent signal from the slug and each sub-section's
+  // title — these are curated labels too, just not filed under that name.
+  const slugWords = (item.slug?.en ?? '').split('-').filter(Boolean);
+  const sectionWords = sections.flatMap((s) => (s.title ?? '').toLowerCase().split(/\s+/)).filter(Boolean);
+  const keywords = [...slugWords, ...(primary.section ? [primary.section] : []), ...sectionWords];
+
+  // No hadith reference on Timeline entries, but the year is real,
+  // citeable context — use it as the hawala-equivalent when present.
+  const hawala = primary.gregorianDate ? `${primary.gregorianDate} CE` : undefined;
+
+  return {
+    id: String(item.id ?? item._id ?? ''),
+    source: 'timeline',
+    title: primary.title ?? 'Timeline entry',
+    text,
+    hawala,
+    points: [],
+    keywords,
+    category: primary.section ?? undefined,
+  };
 }

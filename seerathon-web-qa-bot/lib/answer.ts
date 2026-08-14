@@ -22,12 +22,16 @@ const STOPWORDS = new Set([
   'does', 'did', 'about', 'tell', 'me', 'you', 'your', 'please', 'when', 'how',
   'ka', 'ki', 'ke', 'hai', 'mein', 'main', 'kya', 'kis', 'kaisa', 'kaisi',
   'bare', 'bataye', 'bataen', 'kar',
-  // Domain stopwords: these appear in nearly EVERY entry regardless of
-  // topic (every Shamail/Timeline item is about the Prophet ﷺ, narrated by
-  // a companion, etc.), so they contribute zero discriminating signal and
-  // were the direct cause of wrong citations during testing — e.g. "Nabi"
-  // alone was enough to match an unrelated entry about his names/titles.
-  'prophet', 'nabi', 'muhammad', 'beloved', 'holy', 'blessed', 'sallallahu',
+  // Domain stopwords: pure address/honorific terms that appear in nearly
+  // EVERY entry regardless of topic, so they contribute zero discriminating
+  // signal — this was the direct cause of wrong citations during testing,
+  // e.g. "Nabi" alone was enough to match an unrelated entry about his
+  // names/titles. Deliberately does NOT include proper names (Muhammad,
+  // Ahmad, Aisha, Abdullah, ...) — which specific person an entry is about
+  // is real topical signal, not filler, and blanket-filtering "Muhammad"
+  // made a plain question like "when was Muhammad born" score too low
+  // against the actual birth entry during testing.
+  'prophet', 'nabi', 'beloved', 'holy', 'blessed', 'sallallahu',
   'alayhi', 'wasallam', 'sayyiduna', 'sayyidatuna', 'narrated', 'kareem',
   'hazrat', 'huzoor', 'allah', 'said', 'says', 'like', 'once',
 ]);
