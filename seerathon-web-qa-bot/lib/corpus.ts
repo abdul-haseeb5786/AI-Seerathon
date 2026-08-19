@@ -98,7 +98,7 @@ export async function getAllShamail(): Promise<NormalizedEntry[]> {
 export async function getAllTimeline(): Promise<NormalizedEntry[]> {
   if (timelineCache && timelineCache.expiresAt > Date.now()) return timelineCache.data;
   const raw = await corpusFetch('/timeline', { limit: 120 });
-  const data = extractItems(raw).map(normalizeTimelineItem);
+  const data = extractItems(raw).flatMap(normalizeTimelineItem);
   timelineCache = { data, expiresAt: Date.now() + CACHE_TTL_MS };
   return data;
 }
@@ -124,47 +124,77 @@ function normalizeShamailItem(item: any): NormalizedEntry {
   };
 }
 
-function normalizeTimelineItem(item: any): NormalizedEntry {
+// Returns ONE NormalizedEntry PER SUB-SECTION, not one per API item.
+//
+// A real Timeline item (e.g. "Springs of Islam in Medina") bundles several
+// dated sub-events under one id — arrival in Quba, mosque construction,
+// the Ansar-Muhajireen brotherhood, Aisha's marriage, all concatenated.
+// Scoring that whole bundle as one document caused two separate problems,
+// both confirmed live:
+//   1. A long bundle has far more raw text than a typical Shamail entry, so
+//      it has more chances to contain any given word SOMEWHERE, purely by
+//      length — "aaj weather kaisa hai" ended up citing a battle entry,
+//      almost certainly because "weather" appeared once, incidentally, deep
+//      in a long narrative about something else entirely. IDF weights how
+//      RARE a word is corpus-wide, but never accounted for how much raw
+//      text a single candidate document contains.
+//   2. Even a CORRECT match (Hijrah) returned the entire multi-topic bundle
+//      as the answer, when the actual question ("when did it happen") only
+//      needed one specific sub-section.
+// Splitting into one candidate per sub-section fixes both: each candidate
+// is now roughly Shamail-length, and citing one sub-section instead of the
+// whole bundle gives a properly-scoped answer instead of a multi-topic
+// dump. All sub-entries from the same parent still share that parent's real
+// id and title for citation purposes — the API's addressable unit is the
+// parent, so that's what gets cited, even though scoring now happens at the
+// finer-grained sub-section level.
+function normalizeTimelineItem(item: any): NormalizedEntry[] {
   const primary = item.en ?? item.ur ?? {};
   const sections: any[] = Array.isArray(primary.content) ? primary.content : [];
-
-  // Combine every dated sub-event into one readable body, sub-headed by
-  // its own title, in sequence order.
-  const text = sections
-    .slice()
-    .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))
-    .map((s) => (s.title ? `${s.title}\n${s.content_text ?? ''}` : (s.content_text ?? '')))
-    .filter(Boolean)
-    .join('\n\n');
-
-  // Timeline items ship no `keywords` field at all (unlike Shamail), so
-  // this derives equivalent signal from the slug and each sub-section's
-  // title. Runs through the SAME tokenize() used for scoring — not a raw
-  // split — specifically because a raw split let generic words like "his"
-  // through as if they were curated +3 keywords (title: "...Under the Care
-  // of His Grandfather..." vs question "...treat HIS neighbors" — wrong
-  // match, confirmed during testing). Keywords should be content words,
-  // not function words, same bar as everywhere else.
-  const slugText = (item.slug?.en ?? '').replace(/-/g, ' ');
-  const sectionTitleText = sections.map((s) => s.title ?? '').join(' ');
-  const keywords = [
-    ...tokenize(slugText),
-    ...(primary.section ? [primary.section] : []),
-    ...tokenize(sectionTitleText),
-  ];
-
-  // No hadith reference on Timeline entries, but the year is real,
-  // citeable context — use it as the hawala-equivalent when present.
+  const parentId = String(item.id ?? item._id ?? '');
+  const parentTitle = primary.title ?? 'Timeline entry';
   const hawala = primary.gregorianDate ? `${primary.gregorianDate} CE` : undefined;
 
-  return {
-    id: String(item.id ?? item._id ?? ''),
-    source: 'timeline',
-    title: primary.title ?? 'Timeline entry',
-    text,
-    hawala,
-    points: [],
-    keywords,
-    category: primary.section ?? undefined,
-  };
+  const slugWords = tokenize((item.slug?.en ?? '').replace(/-/g, ' '));
+  const parentKeywords = [...slugWords, ...(primary.section ? [primary.section] : [])];
+
+  if (sections.length === 0) {
+    // No sub-sections at all (edge case) — fall back to a single entry so
+    // the item isn't silently dropped, even though there's little text.
+    return [
+      {
+        id: parentId,
+        source: 'timeline',
+        title: parentTitle,
+        text: primary.description || '',
+        hawala,
+        points: [],
+        keywords: parentKeywords,
+        category: primary.section ?? undefined,
+      },
+    ];
+  }
+
+  return sections
+    .slice()
+    .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))
+    .map((section) => {
+      const sectionTitle: string = section.title ?? '';
+      const text = sectionTitle ? `${sectionTitle}\n${section.content_text ?? ''}` : (section.content_text ?? '');
+      return {
+        id: parentId,
+        source: 'timeline' as const,
+        title: parentTitle,
+        text,
+        hawala,
+        points: [],
+        // Parent-level context (slug/section words) PLUS this specific
+        // sub-section's own title — not every sub-section's title, so a
+        // "Passing of the father" sub-entry doesn't inherit keyword weight
+        // from an unrelated sibling sub-section under the same parent.
+        keywords: [...parentKeywords, ...tokenize(sectionTitle)],
+        category: primary.section ?? undefined,
+      };
+    })
+    .filter((entry) => entry.text.trim().length > 0);
 }

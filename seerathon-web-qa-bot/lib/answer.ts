@@ -61,27 +61,49 @@ function computeIdf(entries: NormalizedEntry[]): Map<string, number> {
   return idf;
 }
 
-function scoreEntry(entry: NormalizedEntry, questionTokens: Set<string>, idf: Map<string, number>): number {
+type MatchDetail = {
+  score: number;
+  titleHits: number;
+  distinctTokensMatched: number;
+};
+
   const titleTokens = tokenize(entry.title);
   const bodyTokens = tokenize(`${entry.text} ${entry.category ?? ''}`);
   const keywordTokens = new Set(entry.keywords.map((k) => k.toLowerCase()));
 
   let score = 0;
+  let titleHits = 0;
+  let distinctTokensMatched = 0;
+
   for (const token of questionTokens) {
     const weight = idf.get(token);
     if (!weight) continue; // word doesn't appear anywhere in the corpus at all
 
+    let matchedThisToken = false;
+
     // A title mention is a stronger signal than an incidental body mention
     // — "Compassion ... Towards Animals" matching "animals" in the title is
     // more reliable than a word buried once in a long hadith translation.
-    if (titleTokens.has(token)) score += weight * 1.5;
-    else if (bodyTokens.has(token)) score += weight;
+    if (titleTokens.has(token)) {
+      score += weight * 1.5;
+      titleHits += 1;
+      matchedThisToken = true;
+    } else if (bodyTokens.has(token)) {
+      score += weight;
+      matchedThisToken = true;
+    }
 
     // Curated keyword hits count as an independent extra signal on top —
     // deliberate corpus tagging is worth more than incidental phrasing.
-    if (keywordTokens.has(token)) score += weight;
+    if (keywordTokens.has(token)) {
+      score += weight;
+      matchedThisToken = true;
+    }
+
+    if (matchedThisToken) distinctTokensMatched += 1;
   }
-  return score;
+
+  return { score, titleHits, distinctTokensMatched };
 }
 
 // Confidence floor, in IDF-weighted points rather than a flat word count.
@@ -93,25 +115,41 @@ function scoreEntry(entry: NormalizedEntry, questionTokens: Set<string>, idf: Ma
 // ones.
 const MIN_CONFIDENT_SCORE = 2;
 
+function isConfidentMatch(detail: MatchDetail): boolean {
+  if (detail.score < MIN_CONFIDENT_SCORE) return false;
+  // A rare word alone isn't proof of a real topical match — it can just be
+  // an incidental mention buried in a long entry. Confirmed live: "aaj
+  // weather kaisa hai" scored above threshold and confidently cited a
+  // battle entry, almost certainly because "weather" happened to appear
+  // once, deep in that entry's text, not because the entry is in any way
+  // about weather. A single-word match is only trustworthy when that word
+  // is in the TITLE (the entry is centrally about it) — otherwise require
+  // at least 2 distinct matching words, so a genuine topical overlap can't
+  // be faked by one lucky rare word.
+  if (detail.distinctTokensMatched < 2 && detail.titleHits === 0) return false;
+  return true;
+}
+
 function pickBestMatch(candidates: NormalizedEntry[], question: string): NormalizedEntry | null {
   const questionTokens = tokenize(question);
   const validCandidates = candidates.filter((c) => c.text && c.text.trim().length >= 3);
   const idf = computeIdf(validCandidates);
 
   let best: NormalizedEntry | null = null;
-  let bestScore = 0;
+  let bestDetail: MatchDetail = { score: 0, titleHits: 0, distinctTokensMatched: 0 };
 
   for (const candidate of validCandidates) {
-    const score = scoreEntry(candidate, questionTokens, idf);
-    if (score > bestScore) {
-      bestScore = score;
+    const detail = scoreEntry(candidate, questionTokens, idf);
+    if (detail.score > bestDetail.score) {
+      bestDetail = detail;
       best = candidate;
     }
   }
 
-  // No overlap with anything in the corpus at all = no grounding = honest
-  // fallback, never a guess.
-  return bestScore >= MIN_CONFIDENT_SCORE ? best : null;
+  // No overlap with anything in the corpus at all, or the overlap that
+  // exists isn't trustworthy enough (see isConfidentMatch) = no grounding
+  // = honest fallback, never a guess.
+  return best && isConfidentMatch(bestDetail) ? best : null;
 }
 
 function formatAnswer(entry: NormalizedEntry): string {

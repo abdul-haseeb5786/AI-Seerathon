@@ -48,54 +48,64 @@ just different field names:
 - Verified live: "When was Prophet Muhammad born?" now correctly answers
   from the real Blessed Birth entry, formats both sub-events, cites "571 CE."
 
-**Matching algorithm — went through 4 rounds of live-testing fixes, in order:**
+**Matching algorithm — 5 rounds of live-testing fixes, in order:**
 
 1. *Flat scoring, threshold ≥1.* Original version. A single incidental shared
    word was enough to confidently cite the wrong hadith — e.g. a question
    about eating returned an entry about the Prophet's ﷺ names, because they
    coincidentally shared "Nabi."
 2. *Domain stopwords + threshold raised to 3.* Filtered out address/honorific
-   terms that appear in nearly every entry regardless of topic (prophet,
-   nabi, sayyiduna, beloved, holy, blessed, hazrat, sallallahu, alayhi,
-   wasallam, ...) — deliberately *not* proper names (Muhammad, Ahmad, Aisha,
-   ...), since which person an entry is about is real topical signal, not
-   filler. Fixed the 3 known wrong-citations, confirmed no regressions.
-3. *Shared tokenizer (`lib/text.ts`).* A second false match surfaced during
-   Timeline retesting: "How did the Prophet treat his neighbors?" answered
-   from an entry about being raised by his grandfather, because the pronoun
-   "his" was in both, and `normalizeTimelineItem()`'s keyword derivation
-   used a raw `.split()` with no stopword filtering — so "his" scored as a
-   curated keyword hit instead of being filtered like everywhere else. Fixed
-   by moving stopwords + `tokenize()` into one shared module so keyword
-   derivation and scoring can't drift apart again.
+   terms that appear in nearly every entry regardless of topic. Fixed the 3
+   known wrong-citations, confirmed no regressions.
+3. *Shared tokenizer (`lib/text.ts`).* A pronoun ("his") leaked through
+   Timeline's keyword derivation as a false keyword hit because that
+   derivation used a raw `.split()` instead of the same filter used for
+   scoring. Fixed by sharing one tokenizer between both.
 4. *TF-IDF weighting.* The threshold from step 2 that stopped false
    positives was also too strict for short real questions — "How did the
-   Prophet treat animals?" only has 2 content words after stopword-filtering,
-   and lost to whatever else happened to share one. Confirmed via
-   `/shamail?limit=120` full-text search that "neighbors," "animals," and
-   "smile" entries genuinely exist in the corpus — these were matching
-   misses, not "not in corpus" cases. Replaced the flat +1/+3 count with IDF
-   computed live from whatever corpus is fetched (a word in 1-2 of ~154
-   entries scores far higher than one in dozens), plus a 1.5x bonus for
-   title matches over body-text matches, keeping the domain stopwords on top
-   — testing showed IDF alone wasn't enough, since this corpus's own titles
-   are formulaic ("The Beloved Prophet's compassion towards X"), so words
-   like "beloved" recur often enough within the corpus's own phrasing to
-   still cause false ties without an explicit filter.
+   Prophet treat animals?" only has 2 content words after stopword-filtering.
+   Confirmed via `/shamail?limit=120` full-text search that "neighbors,"
+   "animals," and "smile" entries genuinely exist — these were matching
+   misses, not "not in corpus" cases. Replaced flat +1/+3 counting with IDF
+   computed live from the fetched corpus, plus a title-match bonus, keeping
+   domain stopwords on top (IDF alone wasn't enough — this corpus's titles
+   are formulaic enough that common words still caused false ties).
+5. *Sub-section splitting + a 2-token confidence gate.* Live retest surfaced
+   a new, more serious false positive: "aaj weather kaisa hai" confidently
+   cited a battle entry. Cause: Timeline entries bundle several sub-events
+   into one long document, and a long document has far more raw text than a
+   typical Shamail entry — more chances for any rare word to appear
+   SOMEWHERE incidentally, which IDF can't discount (it weighs how rare a
+   word is corpus-wide, not how much text one candidate contains). Two
+   fixes together:
+   - `normalizeTimelineItem()` now returns one candidate **per sub-section**
+     instead of one per bundled item, so Timeline candidates are roughly
+     Shamail-length again. Side effect: also fixed the earlier observation
+     that Hijrah answers were unnecessarily long — the answer is now just
+     the relevant sub-section, still correctly cited to the parent's id/title.
+   - `pickBestMatch()` now rejects a top match resting on only ONE matching
+     word unless that word is in the title — a single incidental body-text
+     word (however rare) is no longer enough alone; either a second
+     matching word or a real title hit is required.
 
-Verified after step 4: "neighbors," "animals," and "smile" questions now
-correctly match their real entries, and every regression from steps 1-3
-(Hijrah/Medina, birth, appearance, moral qualities, the original 3
-wrong-citation fixes) still holds.
+Verified after step 5: the weather/battle false positive is gone, the
+Hijrah answer is properly scoped to one sub-section, and every regression
+from steps 1-4 still holds (neighbors, animals, smile, birth, Medina,
+appearance, moral qualities, all 3 original wrong-citation fixes).
 
-**Known remaining limitation, not fixed:** the "eat with the right hand"
-question still matches the "compassion towards plants" entry (which
-mentions "hand" once) in testing. Very likely a small-sample artifact — in
-my ~16-entry test set "hand" looks rare so it scores high, but in the real
-~154-entry corpus it's probably common enough (physical descriptions,
-actions) that IDF would naturally discount it. Can't confirm without the
-real corpus in hand — worth specifically re-testing live; if still wrong,
-add "hand" to stopwords or nudge `MIN_CONFIDENT_SCORE` up slightly.
+**One case still misfires, and it's a different kind of problem now — not
+an unfixed bug, but a real ceiling of lexical matching:** "Is it sunnah to
+eat with the right hand like the Prophet ﷺ did?" still cites a Battle of
+Khaybar sub-section, about the Prophet ﷺ being offered poisoned meat — its
+text genuinely contains both "hand" ("took a piece in his hand") and "eat,"
+a real 2-word match, not an incidental fluke like the weather case. The
+words line up; the meaning doesn't — a poisoning narrative has nothing to
+do with a question about eating manners as a character trait. No amount of
+stopword or threshold tuning fixes this, because the system matches word
+overlap, not meaning. Closing this for real needs semantic matching —
+embeddings or an LLM re-ranking step over the top few lexical candidates —
+which is a bigger change than this pass. Worth doing if you want it
+airtight; the current version is honest about not being semantic.
 
 **Judgment call — still not decided:** "Is it sunnah to eat with the right
 hand like the Prophet ﷺ did?" is currently **not** treated as a ruling
