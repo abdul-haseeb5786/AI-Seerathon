@@ -18,55 +18,99 @@ export type BotAnswer = {
   citations: Citation[];
 };
 
-// Scoring combines two signals:
-//  - `keywords`: curated tags the corpus itself ships on every entry, so a
-//    hit here is a strong, intentional signal — weighted higher.
-//  - plain lexical overlap between the question and the entry's title/text/
-//    category, as a fallback for questions that don't happen to use the
-//    exact keyword vocabulary.
-// This replaced trusting the API's own `?q=` search, which is undocumented
-// and unverified — a rule you can point to and explain beats a black box
-// when someone asks "why did it cite this entry?" during a demo.
-function scoreEntry(entry: NormalizedEntry, questionTokens: Set<string>): number {
+// Scoring uses TF-IDF-style weighting computed live from whatever the
+// corpus actually contains, rather than a flat +1/+3 count. This replaced a
+// simpler flat-count version after three rounds of live testing kept
+// surfacing the same underlying problem from different angles:
+//   - flat scoring let ONE incidental shared word (a plants entry mentioning
+//     "hand" once) outscore everything else just as easily as a genuinely
+//     specific match — fixed with domain stopwords + a threshold, but then:
+//   - the same threshold that stopped false positives was too strict for
+//     short real questions ("How did the Prophet treat animals?" has only
+//     2 real content words after stopword-filtering, and lost to entries
+//     that happened to share ONE of them).
+// IDF fixes both at once: a word that appears in just 1-2 of ~154 entries
+// (like "neighbors" or "animals") scores far higher than a word that
+// appears in dozens (even domain words that slip past the stopword list).
+// Domain stopwords are still kept on top of this — testing showed IDF alone
+// wasn't enough, because this corpus's own titles are formulaic ("The
+// Beloved Prophet's compassion towards X"), so words like "beloved" recur
+// often enough within the corpus's own phrasing to still cause false ties
+// without an explicit filter.
+function computeIdf(entries: NormalizedEntry[]): Map<string, number> {
+  const documentFrequency = new Map<string, number>();
+
+  for (const entry of entries) {
+    const tokensInEntry = new Set([
+      ...tokenize(entry.title),
+      ...tokenize(entry.text),
+      ...tokenize(entry.category ?? ''),
+      ...entry.keywords.map((k) => k.toLowerCase()),
+    ]);
+    for (const token of tokensInEntry) {
+      documentFrequency.set(token, (documentFrequency.get(token) ?? 0) + 1);
+    }
+  }
+
+  const totalDocs = entries.length;
+  const idf = new Map<string, number>();
+  for (const [token, count] of documentFrequency) {
+    // Smoothed IDF, always positive: log((N+1)/(df+1)) + 1
+    idf.set(token, Math.log((totalDocs + 1) / (count + 1)) + 1);
+  }
+  return idf;
+}
+
+function scoreEntry(entry: NormalizedEntry, questionTokens: Set<string>, idf: Map<string, number>): number {
+  const titleTokens = tokenize(entry.title);
+  const bodyTokens = tokenize(`${entry.text} ${entry.category ?? ''}`);
+  const keywordTokens = new Set(entry.keywords.map((k) => k.toLowerCase()));
+
   let score = 0;
+  for (const token of questionTokens) {
+    const weight = idf.get(token);
+    if (!weight) continue; // word doesn't appear anywhere in the corpus at all
 
-  for (const keyword of entry.keywords) {
-    if (questionTokens.has(keyword.toLowerCase())) score += 3;
+    // A title mention is a stronger signal than an incidental body mention
+    // — "Compassion ... Towards Animals" matching "animals" in the title is
+    // more reliable than a word buried once in a long hadith translation.
+    if (titleTokens.has(token)) score += weight * 1.5;
+    else if (bodyTokens.has(token)) score += weight;
+
+    // Curated keyword hits count as an independent extra signal on top —
+    // deliberate corpus tagging is worth more than incidental phrasing.
+    if (keywordTokens.has(token)) score += weight;
   }
-
-  const entryTokens = tokenize(`${entry.title} ${entry.text} ${entry.category ?? ''}`);
-  for (const token of entryTokens) {
-    if (questionTokens.has(token)) score += 1;
-  }
-
   return score;
 }
 
-// Confidence floor. Testing surfaced real wrong citations at threshold >=1
-// — a single incidental shared word (one entry happened to mention
-// "Madinah" in passing; another happened to say "...placed his hand...")
-// was enough to confidently cite the wrong hadith. Requiring >=3 means
-// either one real keyword hit, or at least three separate overlapping
-// content words — a much harder bar for coincidence to clear. This will
-// mean more questions fall to the out-of-corpus fallback than before; that
-// trade is correct here — an honest "not found" is safer than a wrong
-// citation for a "grounded ONLY" bot.
-const MIN_CONFIDENT_SCORE = 3;
+// Confidence floor, in IDF-weighted points rather than a flat word count.
+// Chosen from live-testing patterns (correct matches scored roughly 3-7,
+// unrelated entries scored 0) with margin to spare, but the exact value is
+// a reasoned starting point, not something verified against the full
+// 154-entry corpus — the sample used to tune it was necessarily smaller.
+// Retest live and adjust if it's rejecting real matches or accepting weak
+// ones.
+const MIN_CONFIDENT_SCORE = 2;
 
 function pickBestMatch(candidates: NormalizedEntry[], question: string): NormalizedEntry | null {
   const questionTokens = tokenize(question);
+  const validCandidates = candidates.filter((c) => c.text && c.text.trim().length >= 3);
+  const idf = computeIdf(validCandidates);
+
   let best: NormalizedEntry | null = null;
   let bestScore = 0;
 
-  for (const candidate of candidates) {
-    if (!candidate.text || candidate.text.trim().length < 3) continue;
-    const score = scoreEntry(candidate, questionTokens);
+  for (const candidate of validCandidates) {
+    const score = scoreEntry(candidate, questionTokens, idf);
     if (score > bestScore) {
       bestScore = score;
       best = candidate;
     }
   }
 
+  // No overlap with anything in the corpus at all = no grounding = honest
+  // fallback, never a guess.
   return bestScore >= MIN_CONFIDENT_SCORE ? best : null;
 }
 

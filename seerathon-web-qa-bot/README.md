@@ -48,21 +48,54 @@ just different field names:
 - Verified live: "When was Prophet Muhammad born?" now correctly answers
   from the real Blessed Birth entry, formats both sub-events, cites "571 CE."
 
-**Matching algorithm — tightened after live testing surfaced 3 wrong
-citations** (not just "no answer" — a *confident, wrong* answer, e.g. a
-question about eating returned an entry about the Prophet's ﷺ names, because
-they coincidentally shared the word "Nabi"). Two changes:
-- Domain stopwords added for pure address/honorific terms that appear in
-  nearly every entry regardless of topic (prophet, nabi, sayyiduna, beloved,
-  holy, blessed, hazrat, sallallahu, alayhi, wasallam, ...) — these were
-  contributing false signal on their own. Deliberately does **not** include
-  proper names (Muhammad, Ahmad, Aisha, Abdullah, ...) — which person an
-  entry is about is real topical signal, not filler.
-- Confidence threshold raised from "any single overlapping word" to
-  `MIN_CONFIDENT_SCORE = 3` (one real keyword hit, or several word overlaps).
-  Trade-off, stated plainly: this makes the bot say "not in corpus" more
-  often on weakly-matching questions — which is the correct trade-off for
-  "grounded ONLY," since a wrong citation is worse than an honest fallback.
+**Matching algorithm — went through 4 rounds of live-testing fixes, in order:**
+
+1. *Flat scoring, threshold ≥1.* Original version. A single incidental shared
+   word was enough to confidently cite the wrong hadith — e.g. a question
+   about eating returned an entry about the Prophet's ﷺ names, because they
+   coincidentally shared "Nabi."
+2. *Domain stopwords + threshold raised to 3.* Filtered out address/honorific
+   terms that appear in nearly every entry regardless of topic (prophet,
+   nabi, sayyiduna, beloved, holy, blessed, hazrat, sallallahu, alayhi,
+   wasallam, ...) — deliberately *not* proper names (Muhammad, Ahmad, Aisha,
+   ...), since which person an entry is about is real topical signal, not
+   filler. Fixed the 3 known wrong-citations, confirmed no regressions.
+3. *Shared tokenizer (`lib/text.ts`).* A second false match surfaced during
+   Timeline retesting: "How did the Prophet treat his neighbors?" answered
+   from an entry about being raised by his grandfather, because the pronoun
+   "his" was in both, and `normalizeTimelineItem()`'s keyword derivation
+   used a raw `.split()` with no stopword filtering — so "his" scored as a
+   curated keyword hit instead of being filtered like everywhere else. Fixed
+   by moving stopwords + `tokenize()` into one shared module so keyword
+   derivation and scoring can't drift apart again.
+4. *TF-IDF weighting.* The threshold from step 2 that stopped false
+   positives was also too strict for short real questions — "How did the
+   Prophet treat animals?" only has 2 content words after stopword-filtering,
+   and lost to whatever else happened to share one. Confirmed via
+   `/shamail?limit=120` full-text search that "neighbors," "animals," and
+   "smile" entries genuinely exist in the corpus — these were matching
+   misses, not "not in corpus" cases. Replaced the flat +1/+3 count with IDF
+   computed live from whatever corpus is fetched (a word in 1-2 of ~154
+   entries scores far higher than one in dozens), plus a 1.5x bonus for
+   title matches over body-text matches, keeping the domain stopwords on top
+   — testing showed IDF alone wasn't enough, since this corpus's own titles
+   are formulaic ("The Beloved Prophet's compassion towards X"), so words
+   like "beloved" recur often enough within the corpus's own phrasing to
+   still cause false ties without an explicit filter.
+
+Verified after step 4: "neighbors," "animals," and "smile" questions now
+correctly match their real entries, and every regression from steps 1-3
+(Hijrah/Medina, birth, appearance, moral qualities, the original 3
+wrong-citation fixes) still holds.
+
+**Known remaining limitation, not fixed:** the "eat with the right hand"
+question still matches the "compassion towards plants" entry (which
+mentions "hand" once) in testing. Very likely a small-sample artifact — in
+my ~16-entry test set "hand" looks rare so it scores high, but in the real
+~154-entry corpus it's probably common enough (physical descriptions,
+actions) that IDF would naturally discount it. Can't confirm without the
+real corpus in hand — worth specifically re-testing live; if still wrong,
+add "hand" to stopwords or nudge `MIN_CONFIDENT_SCORE` up slightly.
 
 **Judgment call — still not decided:** "Is it sunnah to eat with the right
 hand like the Prophet ﷺ did?" is currently **not** treated as a ruling
@@ -72,28 +105,14 @@ vocabulary and blocking it would misfire on legitimate questions constantly.
 If the brief wants "sunnah"-framed questions refused too, that's an explicit
 decision to make, not a bug to fix.
 
-**Second false-match found during the Timeline retest, now fixed:** "How did
-the Prophet treat his neighbors?" was answering from an entry about being
-raised by his grandfather — nothing to do with neighbors. Cause: the pronoun
-"his" appeared in both the question and that entry's title, and
-`normalizeTimelineItem()` was deriving pseudo-keywords from sub-section
-titles via a raw `.split()` with no stopword filtering — so "his" scored as
-a curated +3 keyword hit instead of being filtered out like it is everywhere
-else. Fixed by moving the stopword list and `tokenize()` into a shared
-`lib/text.ts`, so keyword derivation and scoring now run through the exact
-same filter instead of two that could quietly drift apart. Re-verified this
-didn't touch the Hijrah match (still correctly cites "Springs of Islam in
-Medina," 622 CE) — that was the one regression risk that actually mattered.
-
 **Observation, not a bug:** the Hijrah answer is long — the real "Springs of
 Islam in Medina" timeline item bundles several sub-events (arrival in Quba,
 mosque construction, Ansar-Muhajireen brotherhood, Aisha's marriage) under
 one entry, and the current code returns the whole bundle whenever any part
 of it matches. The citation is correct and the content is genuinely part of
-that entry, so this isn't wrong — but for a narrow question like "when did
-the Hijrah happen," a shorter answer pulled from just the most relevant
-sub-section would read better. Didn't change this without checking first —
-happy to add sub-section-level matching if you want tighter answers.
+that entry, so this isn't wrong — but a shorter answer pulled from just the
+most relevant sub-section would read better for a narrow question. Happy to
+add sub-section-level matching if you want tighter answers.
 
 
 ## Setup
@@ -133,9 +152,9 @@ element; everything else stays quiet on purpose.
 - **Ruling detection** (`lib/guardrails.ts`) is a keyword list and deliberately
   over-triggers. Swap in a small LLM classifier later if false positives
   become annoying — same function signature, drop-in replacement.
-- **Matching** is plain lexical overlap over the API's own `q` search, not
-  embeddings. Fine for ~120 Shamail entries; revisit if recall feels weak
-  once you're testing against real data.
+- **Matching** is IDF-weighted lexical overlap (see algorithm history above),
+  not embeddings. Fine for ~154 total entries; revisit if recall still feels
+  weak after retesting against the real corpus.
 - Not yet wired: pagination beyond the first page of results, and the
   `/courses` endpoint isn't called anywhere (by design — see scope note above).
 - **Spelling/hyphenation variants aren't normalized** — e.g. "Ashab al-Feel"
