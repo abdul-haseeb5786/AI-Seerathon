@@ -52,6 +52,22 @@ const RULING_KEYWORDS = [
   'durust hai',
   'shariat mein',
   'shariat ka hukum',
+
+  // "Is it sunnah to X" / "is X a sunnah" — a yes/no fiqh-category
+  // classification question, not a descriptive one. Deliberately narrow:
+  // does NOT include bare "sunnah", which is also normal Shamail vocabulary
+  // ("what sunnahs did the Prophet practice regarding eating" should still
+  // search the corpus). This specific phrasing pattern resolves a judgment
+  // call flagged repeatedly during testing — "Is it sunnah to eat with the
+  // right hand?" kept landing on unrelated Timeline entries via coincidental
+  // 2-word lexical overlap (see lib/answer.ts / README), because the
+  // matcher has no way to know the question is really asking for a ruling
+  // classification. Routing it here is more correct than continuing to
+  // tune the matcher against it.
+  'is it sunnah',
+  'is it a sunnah',
+  'is this sunnah',
+  'is that sunnah',
 ];
 
 export function isRulingQuestion(question: string): boolean {

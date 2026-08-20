@@ -93,36 +93,40 @@ Hijrah answer is properly scoped to one sub-section, and every regression
 from steps 1-4 still holds (neighbors, animals, smile, birth, Medina,
 appearance, moral qualities, all 3 original wrong-citation fixes).
 
-**One case still misfires, and it's a different kind of problem now — not
-an unfixed bug, but a real ceiling of lexical matching:** "Is it sunnah to
-eat with the right hand like the Prophet ﷺ did?" still cites a Battle of
-Khaybar sub-section, about the Prophet ﷺ being offered poisoned meat — its
-text genuinely contains both "hand" ("took a piece in his hand") and "eat,"
-a real 2-word match, not an incidental fluke like the weather case. The
-words line up; the meaning doesn't — a poisoning narrative has nothing to
-do with a question about eating manners as a character trait. No amount of
-stopword or threshold tuning fixes this, because the system matches word
-overlap, not meaning. Closing this for real needs semantic matching —
+**One case still misfires** — retested live twice, and the specific
+sub-section it lands on changes between runs (first "Battle of Khaybar /
+poisoned meat," then "Battle of Khaybar / Umrah-tul-Qada"), which says
+something useful on its own: this isn't one fixable coincidence, it's the
+general shape of the problem — some short passage somewhere in ~154 entries
+will always happen to share 2 words with almost any phrasing, given enough
+candidates. **Resolved differently, not by chasing the matcher further:**
+"Is it sunnah to eat with the right hand...?" is a yes/no fiqh-category
+classification question, not a descriptive one — so it now goes through
+`isRulingQuestion()` in `lib/guardrails.ts` (narrow pattern: "is it sunnah" /
+"is it a sunnah" / "is this sunnah," deliberately not bare "sunnah," which
+is also normal Shamail vocabulary — "what sunnahs did the Prophet practice
+regarding eating" should still search the corpus). This also resolves the
+judgment call flagged repeatedly during earlier testing. **Not yet
+re-verified live** — retest this exact question after redeploying; it
+should now come back as a refusal, not a citation.
+
+For any *other* phrasing that hits this same class of coincidental overlap
+(not caught by the ruling gate), the real fix is semantic matching —
 embeddings or an LLM re-ranking step over the top few lexical candidates —
 which is a bigger change than this pass. Worth doing if you want it
-airtight; the current version is honest about not being semantic.
+airtight against paraphrases; the current version is honest about not being
+semantic.
 
-**Judgment call — still not decided:** "Is it sunnah to eat with the right
-hand like the Prophet ﷺ did?" is currently **not** treated as a ruling
-question — `isRulingQuestion()` only flags phrases like "is it allowed" /
-"jaiz hai", not bare "sunnah", because that word is also normal Shamail
-vocabulary and blocking it would misfire on legitimate questions constantly.
-If the brief wants "sunnah"-framed questions refused too, that's an explicit
-decision to make, not a bug to fix.
-
-**Observation, not a bug:** the Hijrah answer is long — the real "Springs of
-Islam in Medina" timeline item bundles several sub-events (arrival in Quba,
-mosque construction, Ansar-Muhajireen brotherhood, Aisha's marriage) under
-one entry, and the current code returns the whole bundle whenever any part
-of it matches. The citation is correct and the content is genuinely part of
-that entry, so this isn't wrong — but a shorter answer pulled from just the
-most relevant sub-section would read better for a narrow question. Happy to
-add sub-section-level matching if you want tighter answers.
+**Minor nuance observed in live retest, not a bug:** for "Hijrah Madinah
+kab hui," the specific sub-section returned changed between test runs (once
+"The Arrival in Quba," once "Bridal departure of Sayyidah Aisha" — the
+latter mentions "Hijrah" and "Madinah" by name directly, which out-scores a
+sub-section that describes the same events without using those exact
+words). The citation and hawala (622 CE) stayed correct both times, and the
+content returned is genuinely from the right entry — it's a question of
+which sub-section is *most* on-point for a narrow "when" question, not a
+wrong-topic match. Not chasing this further; a real fix here is the same
+semantic-matching upgrade mentioned above, not another lexical tweak.
 
 
 ## Setup
