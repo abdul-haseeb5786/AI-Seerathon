@@ -67,6 +67,7 @@ type MatchDetail = {
   distinctTokensMatched: number;
 };
 
+function scoreEntry(entry: NormalizedEntry, questionTokens: Set<string>, idf: Map<string, number>): MatchDetail {
   const titleTokens = tokenize(entry.title);
   const bodyTokens = tokenize(`${entry.text} ${entry.category ?? ''}`);
   const keywordTokens = new Set(entry.keywords.map((k) => k.toLowerCase()));
